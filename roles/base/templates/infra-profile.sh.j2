@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Prompt coloré selon l'environnement (rouge = prod)
+case "{{ base_environment }}" in
+  prod) _infra_c='1;31' ;;
+  *)    _infra_c='1;32' ;;
+esac
+if [ -n "${BASH_VERSION:-}" ] && [ -n "${PS1:-}" ]; then
+  PS1="\[\e[${_infra_c}m\][{{ base_environment }}] \u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ "
+fi
+alias ll='ls -lah --color=auto'
+alias ports='ss -tulpn'
+alias dps='docker ps --format "table {% raw %}{{.Names}}\t{{.Status}}\t{{.Ports}}{% endraw %}"'
+alias tsip='tailscale ip -4'

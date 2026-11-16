@@ -1,0 +1,40 @@
+---
+- name: Caddy hôte (paquet Debian) retiré, remplacé par le conteneur
+  ansible.builtin.apt:
+    name: caddy
+    state: absent
+    purge: true
+    autoremove: true
+
+- name: Répertoire de la stack
+  ansible.builtin.file:
+    path: "{{ caddy_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ caddy_dir }}/Caddyfile"
+    mode: "0644"
+    owner: root
+    group: root
+    # Configuration refusée avant d'être posée : le redémarrage du handler ne doit jamais faire tomber les sites
+    validate: "docker run --rm --network none -v %s:/etc/caddy/Caddyfile:ro {{ caddy_image }} caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"
+  notify: Recharger caddy
+
+- name: Compose
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ caddy_dir }}/compose.yml"
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Conteneur caddy démarré
+  community.docker.docker_compose_v2:
+    project_src: "{{ caddy_dir }}"
+    files: [compose.yml]
+    state: present

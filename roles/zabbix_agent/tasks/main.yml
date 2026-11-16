@@ -1,0 +1,61 @@
+---
+- name: Exiger un serveur Zabbix
+  ansible.builtin.assert:
+    that: zabbix_agent_server | length > 0
+    fail_msg: "zabbix_agent_server non défini."
+
+- name: IP Tailscale, mode passif uniquement
+  ansible.builtin.command: tailscale ip -4
+  register: zabbix_agent_tsip
+  changed_when: false
+  check_mode: false
+  when: zabbix_agent_mode == 'passive' and tailscale_enabled | default(true) | bool
+
+- name: IP d'écoute en mode passif
+  ansible.builtin.set_fact:
+    zabbix_agent_listen_ip: "{{ (zabbix_agent_tsip.stdout | trim) if tailscale_enabled | default(true) | bool else ansible_facts.default_ipv4.address }}"
+  when: zabbix_agent_mode == 'passive'
+
+- name: Installer zabbix-agent2
+  ansible.builtin.apt:
+    name: zabbix-agent2
+    state: present
+
+- name: Accès au socket Docker pour le modèle Docker
+  ansible.builtin.user:
+    name: zabbix
+    groups: docker
+    append: true
+  when: "'docker' in zabbix_agent_tags and not ansible_check_mode"
+  notify: Redémarrer zabbix-agent2
+
+- name: Configuration de l'agent
+  ansible.builtin.copy:
+    dest: /etc/zabbix/zabbix_agent2.d/infra.conf
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Géré par Ansible (rôle zabbix_agent)
+      ServerActive={{ zabbix_agent_server }}
+      Hostname={{ zabbix_agent_hostname }}
+      HostMetadata={{ zabbix_agent_host_metadata }}
+      {% if zabbix_agent_mode == 'passive' %}
+      Server={{ zabbix_agent_server }}
+      ListenIP={{ zabbix_agent_listen_ip }}
+      ListenPort=10050
+      {% else %}
+      # Mode actif : pas de connexion entrante (Server vide), l'agent initie vers le serveur
+      Server=
+      {% endif %}
+      {% for p in zabbix_agent_user_parameters %}
+      UserParameter={{ p }}
+      {% endfor %}
+  notify: Redémarrer zabbix-agent2
+
+- name: Zabbix-agent2 actif
+  ansible.builtin.systemd_service:
+    name: zabbix-agent2
+    enabled: true
+    state: started
+  when: not ansible_check_mode  # le paquet n'est pas installé en --check

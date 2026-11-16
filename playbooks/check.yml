@@ -1,0 +1,4 @@
+---
+# Drift check: run site.yml with --check --diff; it must report changed=0.
+- name: Drift check
+  ansible.builtin.import_playbook: site.yml

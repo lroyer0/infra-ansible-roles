@@ -1,0 +1,54 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# On ne fait pas "flush ruleset" : Docker gère ses propres tables.
+table inet infra_filter
+delete table inet infra_filter
+
+table inet infra_filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    ct state invalid drop
+    meta l4proto { icmp, ipv6-icmp } accept
+{% if hardening_allow_dhcp %}
+    iifname != "tailscale0" udp dport 68 accept
+    iifname != "tailscale0" ip6 saddr fe80::/10 udp dport 546 accept
+{% endif %}
+{% if hardening_tailscale_tcp_ports | length > 0 %}
+    iifname "tailscale0" tcp dport { {{ hardening_tailscale_tcp_ports | join(', ') }} } accept
+{% endif %}
+{% if hardening_tailscale_udp_ports | length > 0 %}
+    iifname "tailscale0" udp dport { {{ hardening_tailscale_udp_ports | join(', ') }} } accept
+{% endif %}
+{% if hardening_ssh_sources | length > 0 %}
+    ip saddr { {{ hardening_ssh_sources | join(', ') }} } tcp dport 22 accept
+{% endif %}
+{% if docker_enabled | default(true) | bool and unbound_enabled | default(true) | bool %}
+    # Conteneurs (docker0 et réseaux Compose br-*) -> Unbound sur la passerelle du bridge, pour leur DNS
+    iifname "docker0" ip daddr {{ unbound_docker_gateway | default('172.31.0.1') }} meta l4proto { udp, tcp } th dport 53 accept
+    iifname "br-*" ip daddr {{ unbound_docker_gateway | default('172.31.0.1') }} meta l4proto { udp, tcp } th dport 53 accept
+{% endif %}
+{% for r in hardening_extra_input_rules %}
+    {{ r }}
+{% endfor %}
+  }
+{% if hardening_extra_output_rules | length > 0 %}
+  # Sorties de processus locaux (par utilisateur, ex. connecteur cloudflared) : politique accept, seules les règles listées restreignent
+  chain output {
+    type filter hook output priority 0; policy accept;
+{% for r in hardening_extra_output_rules %}
+    {{ r }}
+{% endfor %}
+  }
+{% endif %}
+{% if hardening_extra_forward_rules | length > 0 %}
+  # Ports publiés par Docker (DNAT) : ils contournent la chaîne input, on les filtre ici (politique accept : Docker garde ses règles)
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+{% for r in hardening_extra_forward_rules %}
+    {{ r }}
+{% endfor %}
+  }
+{% endif %}
+}

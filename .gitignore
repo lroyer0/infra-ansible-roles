@@ -1,0 +1,4 @@
+*.retry
+.venv/
+*.sops.yaml
+secrets/

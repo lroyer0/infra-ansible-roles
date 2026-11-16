@@ -1,0 +1,39 @@
+---
+# Échoue si un socket écoute sur toutes les interfaces (0.0.0.0, [::], *) hors ports tolérés.
+# Tolérés : DHCP (68, 546), tailscaled (41641/udp), sshd (22), et 80/443 sur les hôtes Caddy.
+# Tous filtrés par nftables : le test vérifie la politique drop, et que 80/443 ne s'ouvrent qu'à des plages (saddr).
+- name: Aucun service n'écoute sur une interface publique
+  hosts: tier1
+  become: true
+  gather_facts: false
+  vars:
+    tests_tolerated_ports: "{{ [22, 68, 546, 41641] + ([80, 443] if 'caddy_hosts' in group_names else []) }}"
+  tasks:
+    - name: Lister les sockets en écoute
+      ansible.builtin.command: ss -H -tuln
+      register: tests_ss
+      changed_when: false
+    - name: Refuser 0.0.0.0, [::] et * hors ports tolérés
+      ansible.builtin.assert:
+        that: >-
+          tests_ss.stdout_lines
+          | select('search', '\s(0\.0\.0\.0|\[::\]|\*):[0-9]+\s')
+          | reject('search', ':(' ~ (tests_tolerated_ports | join('|')) ~ ')\s')
+          | list | length == 0
+        fail_msg: "Écoute publique détectée : {{ tests_ss.stdout_lines }}"
+    - name: Règles nftables de l'entrée
+      ansible.builtin.command: nft list table inet infra_filter
+      register: tests_nft
+      changed_when: false
+    - name: Refuser une entrée sans politique drop
+      ansible.builtin.assert:
+        that: "'policy drop' in tests_nft.stdout"
+        fail_msg: "La chaîne d'entrée nftables n'est pas en drop"
+    - name: Refuser 80/443 ouverts sans restriction de source
+      ansible.builtin.assert:
+        that: >-
+          tests_nft.stdout_lines
+          | select('search', 'dport \{ 80, 443 \}')
+          | reject('search', 'saddr')
+          | list | length == 0
+        fail_msg: "80/443 acceptés sans restriction de source (plages Cloudflare attendues)"

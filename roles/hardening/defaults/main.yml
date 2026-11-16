@@ -1,0 +1,42 @@
+---
+# Services à masquer s'ils existent (jamais walinuxagent ni cloud-init sur Azure)
+hardening_masked_units:
+  - avahi-daemon.service
+  - avahi-daemon.socket
+  - cups.service
+  - cups.socket
+  - cups-browsed.service
+  - ModemManager.service
+  - rpcbind.service
+  - rpcbind.socket
+  - snapd.service
+  - snapd.socket
+  - multipathd.service
+  - apport.service
+  - exim4.service
+  - postfix.service
+  - fail2ban.service
+hardening_removed_packages: [ufw, fail2ban, avahi-daemon, cups, cups-browsed, modemmanager, rpcbind, exim4-base, exim4-daemon-light, postfix, snapd, multipath-tools, apport]
+hardening_ssh_group: ssh-users
+# Clés publiques SSH de l'utilisateur deploy (variable d'inventaire, pas de secret)
+hardening_deploy_authorized_keys: []
+hardening_deploy_user: deploy
+hardening_breakglass_user: breakglass
+# Hash de mot de passe ($6$…) fourni via SOPS ; vide = compte créé verrouillé
+hardening_breakglass_password_hash: ""
+# Ports TCP autorisés en entrée sur tailscale0 selon le rôle de l'hôte
+hardening_tailscale_tcp_ports: [22]
+hardening_tailscale_udp_ports: []
+hardening_extra_input_rules: []
+# Règles de la chaîne output (sorties des processus locaux, p. ex. « meta skuid "cloudflared" ... ») : politique accept, seules ces règles restreignent
+hardening_extra_output_rules: []
+# Règles de la chaîne forward (ports publiés par Docker sur une IP : limiter les sources)
+hardening_extra_forward_rules: []
+hardening_lynis_report_dir: /var/lib/infra/lynis
+# Réponses DHCP (v4 port 68, v6 port 546) : sans elles, le bail est perdu au renouvellement ou au reboot (Azure : DHCPv6 = adresse IPv6)
+hardening_allow_dhcp: true
+# Sources autorisées pour SSH hors tailscale0 (invités maison : VLAN Infra et LAN, accès via le subnet router Tailscale)
+hardening_ssh_sources: []
+# Comptes d'administration nominatifs (accès interactif des humains) : sudo, groupe ssh-users, clés exclusives.
+# deploy reste le compte d'Ansible ; root n'a jamais d'accès SSH.
+hardening_admin_users: []

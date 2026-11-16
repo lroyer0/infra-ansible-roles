@@ -1,0 +1,15 @@
+---
+# Sauvegarde restic quotidienne vers le dépôt maison (rest-server, ajout seulement : le client ne peut pas effacer ses sauvegardes).
+# L'élagage et la vérification se font sur le serveur (rôle restic_server).
+backup_repo_host: ""            # IP du dépôt
+backup_repo_port: 8000
+backup_repo_name: "{{ inventory_hostname }}"
+backup_rest_password: ""        # secret SOPS
+backup_repo_password: ""        # secret SOPS : clé de chiffrement des sauvegardes (à conserver aussi hors du repo)
+backup_time: "03:15"
+backup_dumps_dir: /var/backups/infra/dumps
+backup_paths: [/services]
+backup_excludes: []
+# Dumps SQL faits avant la sauvegarde (les fichiers bruts d'une base en marche ne sont pas cohérents) : {name, container?, command}
+# (sans « container », la commande s'exécute sur l'hôte : ex. sqlite3 … .dump)
+backup_db_dumps: []

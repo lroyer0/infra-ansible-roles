@@ -1,0 +1,8 @@
+---
+# Appelé par site.yml après les stacks (leurs surcharges ramènent les ports sur 127.0.0.1)
+- name: Aucun conteneur ne publie sur toutes les interfaces
+  ansible.builtin.command: docker ps --format '{% raw %}{{.Names}} {{.Ports}}{% endraw %}'
+  register: docker_ps
+  changed_when: false
+  check_mode: false
+  failed_when: docker_ps.stdout_lines | select('search', '(0\.0\.0\.0|\[::\]):[0-9]+->') | list | length > 0

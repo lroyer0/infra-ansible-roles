@@ -1,0 +1,22 @@
+---
+unbound_listen_addrs: ["127.0.0.1", "::1"]
+# IP de la passerelle du bridge Docker dédié (voir rôle docker)
+unbound_docker_gateway: 172.31.0.1
+# 172.16.0.0/12 : tous les réseaux Docker (docker0 et les réseaux Compose br-*), sinon leurs conteneurs reçoivent REFUSED
+unbound_access_control: ["127.0.0.0/8", "::1/128", "172.16.0.0/12"]
+# Dimensionné pour la RAM de l'hôte (6 Go -> 128m/256m), borné entre 16 et 256 Mo
+unbound_cache_msg_mb: "{{ [[(ansible_facts.memtotal_mb | default(1024) | int) // 64, 16] | max, 256] | min }}"
+unbound_cache_rrset_mb: "{{ (unbound_cache_msg_mb | int) * 2 }}"
+unbound_num_threads: "{{ ansible_facts.processor_vcpus | default(1) }}"
+unbound_tailnet_name: ""
+unbound_tailscale_resolver: 100.100.100.100
+unbound_home_domain: "{{ home_domain | default('') }}"
+unbound_home_forward_addr: ""
+unbound_resolv_wanted: "# Géré par Ansible (rôle unbound)\nnameserver 127.0.0.1\noptions edns0 trust-ad\n"
+# IPv6 sortant : à activer seulement si l'hôte a une adresse IPv6 publique (sinon requêtes gaspillées)
+unbound_do_ip6: false
+# Cache : garder plus longtemps et servir une réponse périmée pendant le rafraîchissement
+unbound_cache_min_ttl: 300
+unbound_cache_max_ttl: 86400
+unbound_serve_expired_ttl: 86400
+unbound_serve_expired_client_timeout_ms: 1800

@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+tunnel: {{ cloudflared_tunnel_id }}
+credentials-file: /etc/cloudflared/{{ cloudflared_tunnel_id }}.json
+no-autoupdate: true
+ingress:
+{% for r in cloudflared_ingress %}
+  - hostname: {{ r.hostname }}
+    service: {{ r.service }}
+{% endfor %}
+  - service: {{ cloudflared_fallback_service }}

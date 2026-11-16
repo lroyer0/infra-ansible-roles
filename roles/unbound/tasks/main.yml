@@ -1,0 +1,129 @@
+---
+- name: Installer unbound
+  ansible.builtin.apt:
+    name: [unbound, unbound-anchor, dns-root-data]
+    state: present
+
+- name: Trust anchor DNSSEC initial
+  ansible.builtin.command: unbound-anchor -a /var/lib/unbound/root.key
+  args:
+    creates: /var/lib/unbound/root.key
+  register: unbound_anchor
+  failed_when: unbound_anchor.rc not in [0, 1]
+
+- name: Droits du trust anchor
+  ansible.builtin.file:
+    path: /var/lib/unbound/root.key
+    owner: unbound
+    group: unbound
+    mode: "0644"
+  when: not ansible_check_mode  # root.key n'existe pas encore en --check
+
+- name: Configuration infra
+  ansible.builtin.template:
+    src: infra.conf.j2
+    dest: /etc/unbound/unbound.conf.d/infra.conf
+    mode: "0644"
+    owner: root
+    group: root
+    validate: unbound-checkconf %s
+  notify: Redémarrer unbound
+
+- name: Retirer les fragments Debian qui font doublon ou forwardent vers un résolveur public
+  ansible.builtin.file:
+    path: "/etc/unbound/unbound.conf.d/{{ item }}"
+    state: absent
+  loop: [resolvconf_resolvers.conf]
+  notify: Redémarrer unbound
+
+- name: Unbound actif
+  ansible.builtin.systemd_service:
+    name: unbound
+    enabled: true
+    state: started
+  when: not ansible_check_mode  # le paquet n'est pas installé en --check
+
+# Garde-fou : on ne touche à resolv.conf qu'une fois Unbound prouvé fonctionnel
+- name: Appliquer le redémarrage d'Unbound avant de tester
+  ansible.builtin.meta: flush_handlers
+
+- name: Test de résolution depuis l'hôte (attend la fin de la chauffe d'Unbound)
+  ansible.builtin.command: dig +short +time=3 +tries=1 debian.org @127.0.0.1
+  register: unbound_dig
+  changed_when: false
+  until: unbound_dig.rc == 0 and unbound_dig.stdout | length > 0
+  retries: 24
+  delay: 5
+  check_mode: false
+  when: not (unbound_skip_selftest | default(false)) and not ansible_check_mode
+
+- name: Désactiver systemd-resolved
+  ansible.builtin.systemd_service:
+    name: systemd-resolved
+    enabled: false
+    state: stopped
+    masked: true
+  failed_when: false
+  when: ansible_facts.service_mgr == 'systemd'
+
+- name: Contenu actuel de resolv.conf
+  ansible.builtin.slurp:
+    src: /etc/resolv.conf
+  register: unbound_resolv_current
+  failed_when: false
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container']
+
+- name: Retirer l'attribut immuable si resolv.conf doit changer
+  ansible.builtin.file:
+    path: /etc/resolv.conf
+    attributes: "-i"
+  when:
+    - ansible_facts.virtualization_type | default('') not in ['docker', 'container']
+    - (unbound_resolv_current.content | default('') | b64decode) != unbound_resolv_wanted
+
+- name: Resolv.conf statique sur unbound
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    content: "{{ unbound_resolv_wanted }}"
+    mode: "0644"
+    owner: root
+    group: root
+    follow: false
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container']
+
+- name: Proxmox ne réécrit pas resolv.conf du conteneur
+  ansible.builtin.copy:
+    content: ""
+    dest: /etc/.pve-ignore.resolv.conf
+    mode: "0644"
+    owner: root
+    group: root
+    force: false
+  when: ansible_facts.virtualization_type | default('') == 'lxc'
+
+- name: Attributs de resolv.conf
+  ansible.builtin.command: lsattr -d /etc/resolv.conf
+  register: unbound_resolv_attrs
+  changed_when: false
+  failed_when: unbound_resolv_attrs.rc != 0 and not ansible_check_mode  # lien symbolique avant le premier passage
+  check_mode: false
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container', 'lxc']
+
+- name: Resolv.conf protégé contre DHCP / cloud-init
+  ansible.builtin.file:
+    path: /etc/resolv.conf
+    attributes: "+i"
+  when:
+    - ansible_facts.virtualization_type | default('') not in ['docker', 'container', 'lxc']
+    - unbound_resolv_attrs.stdout is not search('^\\S*i')
+
+- name: Empêcher cloud-init de gérer resolv.conf
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-infra-no-resolv.cfg
+    content: |
+      manage_resolv_conf: false
+    mode: "0644"
+    owner: root
+    group: root
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container']
+  failed_when: false

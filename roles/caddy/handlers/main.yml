@@ -1,0 +1,6 @@
+---
+# Redémarrage et non « caddy reload » : le Caddyfile est monté seul dans le conteneur ; Ansible le remplace par renommage (nouvel inode),
+# le conteneur garde l'ancien fichier et un reload relisait l'ancienne configuration (constaté le 2026-11-07, en-têtes non appliqués).
+- name: Recharger caddy
+  ansible.builtin.command: docker restart caddy
+  changed_when: true

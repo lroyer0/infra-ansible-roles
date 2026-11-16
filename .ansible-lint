@@ -1,0 +1,4 @@
+---
+# Les listes de données (modèles Zabbix générés, expressions) dépassent 160 caractères : yamllint les signale déjà en avertissement.
+skip_list:
+  - yaml[line-length]

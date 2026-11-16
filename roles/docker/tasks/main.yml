@@ -1,0 +1,74 @@
+---
+- name: Prérequis du module deb822_repository
+  ansible.builtin.apt:
+    name: python3-debian
+    state: present
+
+- name: Répertoire des clés apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Clé du dépôt Docker
+  ansible.builtin.get_url:
+    url: "{{ docker_apt_key_url }}"
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Dépôt Docker
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: "{{ docker_apt_uri }}"
+    suites: [trixie]
+    components: [stable]
+    signed_by: /etc/apt/keyrings/docker.asc
+    state: present
+  register: docker_repo
+
+- name: Mise à jour du cache apt  # noqa: no-handler
+  ansible.builtin.apt:
+    update_cache: true
+  when: docker_repo is changed
+
+- name: Installer docker-ce et compose
+  ansible.builtin.apt:
+    name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+    state: present
+  when: not (ansible_check_mode and docker_repo is changed)  # le dépôt n'existe pas encore en --check
+
+- name: Daemon.json
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    owner: root
+    group: root
+    content: "{{ docker_daemon_config | to_nice_json }}\n"
+  vars:
+    docker_daemon_config:
+      ip: "{{ docker_bind_ip }}"
+      bip: "{{ docker_bridge_cidr }}"
+      dns: "{{ docker_dns_ips }}"
+      log-driver: local
+      log-opts:
+        max-size: "{{ docker_log_max_size }}"
+        max-file: "{{ docker_log_max_file }}"
+      live-restore: true
+      userland-proxy: false
+      no-new-privileges: true
+  notify: Redémarrer docker
+
+- name: Docker actif
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Appliquer les handlers avant les tests
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,19 @@
+---
+# Tunnel géré en local (identifiants + règles d'entrée). Réplica d'un tunnel existant : même identifiant et mêmes identifiants.
+cloudflared_apt_key_url: https://pkg.cloudflare.com/cloudflare-main.gpg
+cloudflared_apt_uri: https://pkg.cloudflare.com/cloudflared
+cloudflared_user: cloudflared
+cloudflared_tunnel_id: ""
+# Contenu JSON du fichier d'identifiants du tunnel (secret SOPS : secrets/cloudflared.sops.yaml). Sans lui, le rôle installe sans démarrer.
+# cloudflared_credentials_json_<hôte> (propre à l'hôte) ou cloudflared_credentials_json (commun) : définis par SOPS uniquement
+cloudflared_ingress: []
+# Origine locale du health check : les règles d'entrée doivent finir par un service de repli
+cloudflared_fallback_service: http_status:404
+# Verrou : tant que les origines ne sont pas joignables depuis ce nœud, un réplica démarré recevrait du trafic qu'il ne peut pas servir.
+cloudflared_start: false
+# Faux : le rôle écrit le jeton et l'unité mais ne démarre, n'arrête ni n'active le service (piloté par un autre mécanisme : portier du tunnel « status »).
+cloudflared_service_managed: true
+# Unité systemd très durcie (connecteur du tunnel « status ») : appareils, noyau, espaces de noms, appels système, mémoire.
+# Faux par défaut : l'unité du LXC cloudflared existant n'est pas modifiée.
+cloudflared_hardened: false
+cloudflared_memory_max: 256M

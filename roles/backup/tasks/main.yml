@@ -1,0 +1,92 @@
+---
+- name: Paquets restic et jq
+  ansible.builtin.apt:
+    name: [restic, jq]
+    state: present
+
+- name: Répertoires
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+  loop:
+    - {path: /etc/restic, mode: "0700"}
+    - {path: /var/lib/infra-backup, mode: "0755"}
+    - {path: "{{ backup_dumps_dir }}", mode: "0700"}
+
+- name: Identifiants du dépôt (SOPS, jamais journalisés)
+  ansible.builtin.copy:
+    dest: "{{ item.dest }}"
+    content: "{{ item.content }}"
+    mode: "0600"
+    owner: root
+    group: root
+  loop:
+    - dest: /etc/restic/env
+      content: |
+        RESTIC_REPOSITORY=rest:http://{{ backup_repo_host }}:{{ backup_repo_port }}/{{ backup_repo_name }}/
+        RESTIC_REST_USERNAME={{ backup_repo_name }}
+        RESTIC_REST_PASSWORD={{ backup_rest_password }}
+    - dest: /etc/restic/password
+      content: "{{ backup_repo_password }}\n"
+  loop_control: {label: "{{ item.dest }}"}
+  no_log: true
+
+- name: Scripts de sauvegarde et de mesure
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+  loop:
+    # La mesure est lue par l'agent Zabbix (0755) ; la sauvegarde elle-même reste réservée à root (0750).
+    - {src: infra-backup.sh.j2, dest: /usr/local/sbin/infra-backup, mode: "0750"}
+    - {src: backup-metric.sh.j2, dest: /usr/local/bin/infra-backup-metric, mode: "0755"}
+
+- name: Unités systemd
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    mode: "0644"
+    owner: root
+    group: root
+    content: "{{ item.content }}"
+  loop:
+    - name: infra-backup.service
+      content: |
+        [Unit]
+        Description=Sauvegarde restic vers le depot maison
+        After=network-online.target docker.service
+        Wants=network-online.target
+        [Service]
+        Type=oneshot
+        Nice=10
+        IOSchedulingClass=idle
+        TimeoutStartSec=3h
+        Environment=XDG_CACHE_HOME=/var/cache/restic
+        ExecStart=/usr/local/sbin/infra-backup
+    - name: infra-backup.timer
+      content: |
+        [Unit]
+        Description=Sauvegarde quotidienne
+        [Timer]
+        OnCalendar=*-*-* {{ backup_time }}:00
+        RandomizedDelaySec=10min
+        Persistent=true
+        [Install]
+        WantedBy=timers.target
+  register: backup_units
+
+- name: Rechargement de systemd  # noqa: no-handler
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: backup_units is changed and not ansible_check_mode
+
+- name: Minuterie de sauvegarde active
+  ansible.builtin.systemd_service:
+    name: infra-backup.timer
+    enabled: true
+    state: started
+  when: not ansible_check_mode

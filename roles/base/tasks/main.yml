@@ -1,0 +1,134 @@
+---
+- name: Hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname_short }}"
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container', 'lxc']
+
+- name: Nom d'hôte résolu localement (sudo)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ inventory_hostname_short }}"
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container', 'lxc']
+
+- name: Fuseau horaire
+  community.general.timezone:
+    name: "{{ base_timezone }}"
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container']
+
+- name: Paquets de base
+  ansible.builtin.apt:
+    name: >-
+      {{ (base_packages | difference(['chrony'] if ansible_facts.virtualization_type | default('') == 'lxc' else []))
+         + (['qemu-guest-agent'] if base_qemu_guest_agent else []) }}
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Locales générées
+  community.general.locale_gen:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ base_locales }}"
+
+# Sans cette réponse debconf, chaque reconfiguration du paquet locales (mise à jour, cloud-init) relance update-locale et remet
+# LANG="en_US.UTF-8" ou C.UTF-8 dans /etc/default/locale : dérive vue sur tous les hôtes le 2026-11-05.
+- name: Locale par défaut figée dans debconf
+  ansible.builtin.debconf:
+    name: locales
+    question: locales/default_environment_locale
+    value: "{{ base_default_locale }}"
+    vtype: select
+
+- name: Locale par défaut
+  ansible.builtin.copy:
+    dest: /etc/default/locale
+    content: "LANG={{ base_default_locale }}\n"
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Chrony actif sauf en LXC
+  ansible.builtin.systemd_service:
+    name: chrony
+    enabled: true
+    state: started
+  when:
+    - ansible_facts.virtualization_type | default('') != 'lxc'
+    - not ansible_check_mode
+
+- name: Qemu-guest-agent actif
+  ansible.builtin.systemd_service:
+    name: qemu-guest-agent
+    enabled: true
+    state: started
+  when:
+    - base_qemu_guest_agent | bool
+    - not ansible_check_mode
+
+- name: Mises à jour automatiques (sécurité uniquement)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52unattended-upgrades-local
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+      };
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ base_reboot_time }}";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+- name: Activer apt periodic
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Répertoire drop-in journald
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Journald plafonné
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/50-infra.conf
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      [Journal]
+      SystemMaxUse={{ base_journald_system_max_use }}
+      MaxRetentionSec=1month
+  notify: Redémarrer journald
+  when: ansible_facts.service_mgr == 'systemd'
+
+- name: Prompt et alias
+  ansible.builtin.template:
+    src: infra-profile.sh.j2
+    dest: /etc/profile.d/infra.sh
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Motd dynamique (affiché au login interactif)
+  ansible.builtin.template:
+    src: motd.sh.j2
+    dest: /etc/profile.d/99-infra-motd.sh
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Horodatage de la dernière exécution Ansible
+  ansible.builtin.shell: date -Iseconds > /var/lib/infra-last-ansible
+  changed_when: false
+  check_mode: false

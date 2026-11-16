@@ -1,0 +1,6 @@
+---
+- name: Redémarrer unbound
+  ansible.builtin.systemd_service:
+    name: unbound
+    state: restarted
+  when: not ansible_check_mode

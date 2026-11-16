@@ -1,0 +1,11 @@
+---
+base_timezone: Europe/Paris
+base_locales: [fr_FR.UTF-8, en_US.UTF-8]
+base_default_locale: fr_FR.UTF-8
+base_environment: prod  # prod = prompt rouge
+base_role_label: "{{ group_names | first | default('host') }}"
+# Fenêtre de reboot automatique : à décaler par hôte (host_vars), jamais identique entre deux nœuds tier 1
+base_reboot_time: "04:00"
+base_journald_system_max_use: 200M
+base_packages: [locales, curl, jq, dnsutils, htop, ncdu, tmux, vim, rsync, git, chrony, unattended-upgrades, logrotate, ca-certificates]
+base_qemu_guest_agent: false  # true sur les VM Proxmox

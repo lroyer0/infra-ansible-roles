@@ -1,0 +1,6 @@
+---
+# Caddy en conteneur (réseau hôte : nftables s'applique). Sert uniquement les sites listés ; TLS Let's Encrypt automatique.
+caddy_image: caddy:2.11-alpine
+caddy_dir: /services/caddy
+# Liste de {host, upstream, aliases} : aliases redirigent vers host (301).
+caddy_sites: []

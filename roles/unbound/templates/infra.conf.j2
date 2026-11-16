@@ -1,0 +1,68 @@
+# {{ ansible_managed }}
+server:
+{% for a in unbound_listen_addrs + [unbound_docker_gateway] %}
+  interface: {{ a }}
+{% endfor %}
+  ip-freebind: yes
+  port: 53
+  do-ip4: yes
+  do-ip6: {{ 'yes' if unbound_do_ip6 | bool else 'no' }}
+  do-udp: yes
+  do-tcp: yes
+  access-control: 0.0.0.0/0 refuse
+  access-control: ::/0 refuse
+{% for n in unbound_access_control %}
+  access-control: {{ n }} allow
+{% endfor %}
+  qname-minimisation: yes
+  hide-identity: yes
+  hide-version: yes
+  harden-glue: yes
+  harden-dnssec-stripped: yes
+  harden-referral-path: yes
+  use-caps-for-id: yes
+  prefetch: yes
+  prefetch-key: yes
+  aggressive-nsec: yes
+  cache-min-ttl: {{ unbound_cache_min_ttl }}
+  cache-max-ttl: {{ unbound_cache_max_ttl }}
+  serve-expired: yes
+  serve-expired-ttl: {{ unbound_serve_expired_ttl }}
+  serve-expired-client-timeout: {{ unbound_serve_expired_client_timeout_ms }}
+  infra-host-ttl: 900
+  so-reuseport: yes
+  minimal-responses: yes
+  rrset-roundrobin: yes
+  deny-any: yes
+  harden-below-nxdomain: yes
+  val-clean-additional: yes
+  root-hints: "/usr/share/dns/root.hints"
+  msg-cache-size: {{ unbound_cache_msg_mb }}m
+  rrset-cache-size: {{ unbound_cache_rrset_mb }}m
+  num-threads: {{ unbound_num_threads }}
+  logfile: ""
+  use-syslog: yes
+  log-queries: no
+  verbosity: 0
+  extended-statistics: yes
+  statistics-cumulative: no
+{% if unbound_tailnet_name | length > 0 %}
+  domain-insecure: "{{ unbound_tailnet_name }}.ts.net"
+  private-domain: "{{ unbound_tailnet_name }}.ts.net"
+{% endif %}
+{% if unbound_home_domain | length > 0 and unbound_home_forward_addr | length > 0 %}
+  domain-insecure: "{{ unbound_home_domain }}"
+  private-domain: "{{ unbound_home_domain }}"
+{% endif %}
+
+{% if unbound_tailnet_name | length > 0 %}
+forward-zone:
+  name: "{{ unbound_tailnet_name }}.ts.net."
+  forward-addr: {{ unbound_tailscale_resolver }}
+
+{% endif %}
+{% if unbound_home_domain | length > 0 and unbound_home_forward_addr | length > 0 %}
+forward-zone:
+  name: "{{ unbound_home_domain }}."
+  forward-addr: {{ unbound_home_forward_addr }}
+{% endif %}

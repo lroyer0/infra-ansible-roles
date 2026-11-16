@@ -1,0 +1,148 @@
+---
+# En premier : une source déclarée deux fois avec deux clés (installation manuelle puis ce rôle) rend apt inutilisable.
+- name: Ancienne déclaration du dépôt (.list, clé dans /usr/share/keyrings) retirée
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: [/etc/apt/sources.list.d/cloudflared.list, /usr/share/keyrings/cloudflare-main.gpg]
+
+- name: Prérequis du dépôt apt
+  ansible.builtin.apt:
+    name: [python3-debian, ca-certificates, curl, gnupg]
+    state: present
+
+- name: Répertoire des clés apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Clé du dépôt Cloudflare
+  ansible.builtin.get_url:
+    url: "{{ cloudflared_apt_key_url }}"
+    dest: /etc/apt/keyrings/cloudflare-main.gpg
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Dépôt Cloudflare
+  ansible.builtin.deb822_repository:
+    name: cloudflared
+    types: [deb]
+    uris: "{{ cloudflared_apt_uri }}"
+    suites: [any]
+    components: [main]
+    signed_by: /etc/apt/keyrings/cloudflare-main.gpg
+    state: present
+  register: cloudflared_repo
+
+- name: Mise à jour du cache apt  # noqa: no-handler
+  ansible.builtin.apt:
+    update_cache: true
+  when: cloudflared_repo is changed
+
+# Toujours la dernière version publiée par Cloudflare (le connecteur doit suivre les correctifs) ; redémarré s'il change.
+- name: Installer cloudflared (dernière version)
+  ansible.builtin.apt:
+    name: cloudflared
+    state: latest  # noqa: package-latest
+    update_cache: true
+    cache_valid_time: 3600
+  notify: Redémarrer cloudflared
+  when: not (ansible_check_mode and cloudflared_repo is changed)
+
+- name: Utilisateur système dédié
+  ansible.builtin.user:
+    name: "{{ cloudflared_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Répertoire de configuration
+  ansible.builtin.file:
+    path: /etc/cloudflared
+    state: directory
+    owner: root
+    group: "{{ cloudflared_user }}"
+    mode: "0750"
+
+- name: Mode et identifiants du tunnel
+  ansible.builtin.set_fact:
+    # Token (tunnel géré à distance, routes dans le dashboard Cloudflare) ou identifiants + règles locales
+    cloudflared_token_effective: "{{ vars['cloudflared_token_' ~ inventory_hostname] | default(cloudflared_token | default('')) }}"
+    cloudflared_credentials_effective: >-
+      {{ vars['cloudflared_credentials_json_' ~ inventory_hostname]
+         | default(cloudflared_credentials_json | default('')) }}
+  no_log: true
+
+- name: Le tunnel est-il configuré ?
+  ansible.builtin.set_fact:
+    cloudflared_token_mode: "{{ cloudflared_token_effective | length > 0 }}"
+    cloudflared_configured: >-
+      {{ cloudflared_token_effective | length > 0
+         or (cloudflared_tunnel_id | length > 0 and cloudflared_credentials_effective | length > 0) }}
+
+- name: Avertissement tunnel non configuré
+  ansible.builtin.debug:
+    msg: "cloudflared installé mais non démarré : un token (SOPS : cloudflared_token_<hôte>) ou cloudflared_tunnel_id et des identifiants (cloudflared_credentials_json_<hôte>) à fournir."
+  when: not cloudflared_configured | bool
+
+- name: Configuration du tunnel
+  when: cloudflared_configured | bool
+  block:
+    - name: Token du tunnel (secret)
+      ansible.builtin.copy:
+        content: "{{ cloudflared_token_effective }}\n"
+        dest: /etc/cloudflared/token
+        owner: root
+        group: "{{ cloudflared_user }}"
+        mode: "0440"
+      no_log: true
+      when: cloudflared_token_mode | bool
+      notify: Redémarrer cloudflared
+
+    - name: Identifiants du tunnel (secret)
+      when: not cloudflared_token_mode | bool
+      ansible.builtin.copy:
+        content: "{{ cloudflared_credentials_effective | to_json if cloudflared_credentials_effective is mapping else cloudflared_credentials_effective }}"
+        dest: "/etc/cloudflared/{{ cloudflared_tunnel_id }}.json"
+        owner: root
+        group: "{{ cloudflared_user }}"
+        mode: "0440"
+      no_log: true
+      notify: Redémarrer cloudflared
+
+    - name: Règles d'entrée
+      when: not cloudflared_token_mode | bool
+      ansible.builtin.template:
+        src: config.yml.j2
+        dest: /etc/cloudflared/config.yml
+        owner: root
+        group: "{{ cloudflared_user }}"
+        mode: "0640"
+        validate: cloudflared --config %s tunnel ingress validate
+      notify: Redémarrer cloudflared
+
+    - name: Unité systemd durcie
+      ansible.builtin.template:
+        src: cloudflared.service.j2
+        dest: /etc/systemd/system/cloudflared.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Redémarrer cloudflared
+
+    - name: Service cloudflared (démarré seulement si cloudflared_start)
+      ansible.builtin.systemd_service:
+        name: cloudflared
+        enabled: "{{ cloudflared_start | bool }}"
+        state: "{{ 'started' if cloudflared_start | bool else 'stopped' }}"
+        daemon_reload: true
+      when: not ansible_check_mode and cloudflared_service_managed | bool
+
+    - name: Rechargement de systemd (service piloté par ailleurs)
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: not ansible_check_mode and not cloudflared_service_managed | bool

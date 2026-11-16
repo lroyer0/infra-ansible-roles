@@ -1,0 +1,249 @@
+---
+- name: Répertoire d'état infra
+  ansible.builtin.file:
+    path: /var/lib/infra
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Services activés avant durcissement (une seule fois)
+  ansible.builtin.shell: systemctl list-unit-files --state=enabled --no-legend > /var/lib/infra/units-before.txt  # noqa: command-instead-of-module
+  args:
+    creates: /var/lib/infra/units-before.txt
+
+- name: Groupe ssh-users
+  ansible.builtin.group:
+    name: "{{ hardening_ssh_group }}"
+    state: present
+
+- name: Utilisateur deploy
+  ansible.builtin.user:
+    name: "{{ hardening_deploy_user }}"
+    groups: "{{ ['sudo'] + ([] if ansible_check_mode else [hardening_ssh_group]) }}"
+    append: true
+    shell: /bin/bash
+    create_home: true
+
+- name: Clés SSH de deploy, liste exclusive
+  ansible.posix.authorized_key:
+    user: "{{ hardening_deploy_user }}"
+    key: "{{ hardening_deploy_authorized_keys | join('\n') }}"
+    exclusive: true
+  when: not ansible_check_mode  # l'utilisateur n'existe pas encore en --check
+
+- name: Comptes d'administration nominatifs
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: "{{ ['sudo'] + ([] if ansible_check_mode else [hardening_ssh_group]) }}"
+    append: true
+    shell: /bin/bash
+    create_home: true
+  loop: "{{ hardening_admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Clés SSH des comptes d'administration, liste exclusive
+  ansible.posix.authorized_key:
+    user: "{{ item.name }}"
+    key: "{{ item.ssh_keys | join('\n') }}"
+    exclusive: true
+  loop: "{{ hardening_admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode
+
+- name: Sudo pour les comptes d'administration
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/91-{{ item.name | replace('.', '-') }}"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
+    mode: "0440"
+    owner: root
+    group: root
+    validate: visudo -cf %s
+  loop: "{{ hardening_admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Sudo sans mot de passe pour deploy
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/90-deploy
+    content: "{{ hardening_deploy_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    mode: "0440"
+    owner: root
+    group: root
+    validate: visudo -cf %s
+
+- name: État du mot de passe root
+  ansible.builtin.command: passwd --status root
+  register: hardening_root_status
+  changed_when: false
+  check_mode: false
+
+- name: Mot de passe root verrouillé (accès console par breakglass, jamais root)
+  ansible.builtin.command: passwd --lock root
+  changed_when: true
+  when: hardening_root_status.stdout.split()[1] not in ['L', 'LK']
+
+- name: Utilisateur breakglass (console uniquement)
+  ansible.builtin.user:
+    name: "{{ hardening_breakglass_user }}"
+    groups: [sudo]
+    append: true
+    shell: /bin/bash
+    password: "{{ hardening_breakglass_password_hash if hardening_breakglass_password_hash | length > 0 else '!' }}"
+    update_password: "{{ 'always' if hardening_breakglass_password_hash | length > 0 else 'on_create' }}"
+  no_log: true
+
+- name: OpenSSH serveur installé
+  ansible.builtin.apt:
+    name: openssh-server
+    state: present
+
+- name: Configuration sshd durcie
+  ansible.builtin.template:
+    src: sshd.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-infra.conf
+    mode: "0644"
+    owner: root
+    group: root
+    validate: sshd -t -f %s
+  notify: Recharger sshd
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container'] or true
+
+- name: Présence d'ufw
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: hardening_ufw
+
+- name: Ufw désactivé avant retrait (vide ses chaînes iptables, nftables prend le relais)
+  ansible.builtin.command: ufw --force disable
+  register: hardening_ufw_off
+  changed_when: "'Firewall stopped' in hardening_ufw_off.stdout"
+  when: hardening_ufw.stat.exists
+
+- name: Paquets inutiles retirés
+  ansible.builtin.apt:
+    name: "{{ hardening_removed_packages }}"
+    state: absent
+    purge: true
+    autoremove: true
+
+- name: Unités présentes sur l'hôte  # noqa: command-instead-of-module
+  ansible.builtin.command: systemctl list-unit-files --no-legend --no-pager {{ hardening_masked_units | join(' ') }}
+  register: hardening_present_units
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: ansible_facts.service_mgr == 'systemd'
+
+- name: Unités inutiles masquées si présentes  # noqa: command-instead-of-module
+  ansible.builtin.command: systemctl mask --now {{ item }}
+  loop: "{{ hardening_present_units.stdout_lines | default([]) | map('split') | map('first') | list }}"
+  register: hardening_mask
+  changed_when: "'Created symlink' in hardening_mask.stderr"
+  when: ansible_facts.service_mgr == 'systemd'
+
+- name: Nftables installé
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+
+- name: Règles nftables
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    mode: "0755"
+    owner: root
+    group: root
+    validate: nft -c -f %s
+  notify: Recharger nftables
+  tags: [firewall]
+
+- name: Règles chargées dans le noyau ?
+  ansible.builtin.command: nft list table inet infra_filter
+  register: hardening_nft_loaded
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [firewall]
+
+- name: Chargement des règles si absentes (dérive, ou handler jamais déclenché)
+  ansible.builtin.command: nft -f /etc/nftables.conf
+  when: hardening_nft_loaded.rc != 0 and not ansible_check_mode
+  changed_when: true
+  tags: [firewall]
+
+- name: Nftables actif au boot
+  ansible.builtin.systemd_service:
+    name: nftables
+    enabled: true
+  tags: [firewall]
+
+- name: Sysctl durcis
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-infra.conf
+    reload: true
+    sysctl_set: true
+  loop: "{{ hardening_sysctl | dict2items | rejectattr('key', 'match', '^kernel\\.') | list
+           if ansible_facts.virtualization_type | default('') == 'lxc' else hardening_sysctl | dict2items }}"
+  vars:
+    hardening_sysctl:
+      net.ipv4.conf.all.rp_filter: 1
+      net.ipv4.conf.default.rp_filter: 1
+      net.ipv4.conf.all.accept_redirects: 0
+      net.ipv4.conf.default.accept_redirects: 0
+      net.ipv6.conf.all.accept_redirects: 0
+      net.ipv6.conf.default.accept_redirects: 0
+      net.ipv4.conf.all.send_redirects: 0
+      net.ipv4.conf.all.accept_source_route: 0
+      net.ipv6.conf.all.accept_source_route: 0
+      kernel.kptr_restrict: 2
+      kernel.dmesg_restrict: 1
+
+- name: AppArmor installé et actif
+  ansible.builtin.apt:
+    name: [apparmor, apparmor-utils]
+    state: present
+
+- name: Service apparmor actif
+  ansible.builtin.systemd_service:
+    name: apparmor
+    enabled: true
+    state: started
+  when: ansible_facts.virtualization_type | default('') not in ['docker', 'container', 'lxc']
+
+- name: Lynis installé
+  ansible.builtin.apt:
+    name: lynis
+    state: present
+
+- name: Services activés après durcissement
+  ansible.builtin.shell: systemctl list-unit-files --state=enabled --no-legend > /var/lib/infra/units-after.txt  # noqa: command-instead-of-module
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Répertoire des rapports lynis
+  ansible.builtin.file:
+    path: "{{ hardening_lynis_report_dir }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  tags: [lynis]
+
+- name: Audit lynis (score et suggestions)
+  ansible.builtin.shell: >-
+    lynis audit system --quiet --no-colors
+    --report-file {{ hardening_lynis_report_dir }}/report.dat
+    > {{ hardening_lynis_report_dir }}/lynis.txt 2>&1
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [lynis]
+  when: hardening_run_lynis | default(false) | bool

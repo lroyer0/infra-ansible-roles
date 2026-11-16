@@ -1,0 +1,18 @@
+---
+# Échoue si un conteneur publie un port sur toutes les interfaces (0.0.0.0 / ::).
+- name: Aucun port publié sur toutes les interfaces
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Hôtes sans Docker ignorés
+      ansible.builtin.meta: end_host
+      when: not (docker_enabled | default(true) | bool)
+    - name: Lister les ports publiés
+      ansible.builtin.command: docker ps --format '{{ '{{' }}.Names{{ '}}' }} {{ '{{' }}.Ports{{ '}}' }}'
+      register: tests_docker_ps
+      changed_when: false
+    - name: Refuser 0.0.0.0 et [::]
+      ansible.builtin.assert:
+        that: tests_docker_ps.stdout_lines | select('search', '(0\.0\.0\.0|\[::\]):[0-9]+->') | list | length == 0
+        fail_msg: "Port publié sur toutes les interfaces : {{ tests_docker_ps.stdout_lines | select('search', '(0\\.0\\.0\\.0|\\[::\\]):[0-9]+->') | list }}"

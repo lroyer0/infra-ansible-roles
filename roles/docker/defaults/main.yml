@@ -1,0 +1,10 @@
+---
+docker_apt_key_url: https://download.docker.com/linux/debian/gpg
+docker_apt_uri: https://download.docker.com/linux/debian
+# Bridge docker0 : sa passerelle porte aussi Unbound
+docker_bridge_ip: 172.31.0.1
+docker_bridge_cidr: 172.31.0.1/24
+docker_bind_ip: 127.0.0.1
+docker_dns_ips: ["{{ docker_bridge_ip }}"]
+docker_log_max_size: 10m
+docker_log_max_file: "3"

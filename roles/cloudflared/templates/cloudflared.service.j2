@@ -1,0 +1,50 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Cloudflare Tunnel {{ "(géré à distance)" if cloudflared_token_mode | bool else "(" ~ cloudflared_tunnel_id ~ ")" }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User={{ cloudflared_user }}
+{% if cloudflared_token_mode | bool %}
+ExecStart=/usr/bin/cloudflared --no-autoupdate --metrics 127.0.0.1:2000 tunnel run --token-file /etc/cloudflared/token
+{% else %}
+ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/config.yml --metrics 127.0.0.1:2000 tunnel run
+{% endif %}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/cloudflared
+CapabilityBoundingSet=
+AmbientCapabilities=
+{% if cloudflared_hardened | bool %}
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+MemoryMax={{ cloudflared_memory_max }}
+TasksMax=128
+LimitNOFILE=4096
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

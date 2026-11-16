@@ -1,0 +1,146 @@
+---
+# Contrôle de sécurité de l'infra gérée par site.yml (lecture seule). Échoue si un écart est trouvé ; tous les écarts sont listés.
+# Usage : ansible-playbook tests/security-check.yml [--limit hôte]
+# AppArmor n'est pas contrôlé dans un LXC (confiné par l'hôte Proxmox). Ports d'écoute de tailscaled tolérés (peerapi).
+# Ports attendus (TCP, vus de l'extérieur) : variable d'hôte security_expected_ports (défaut : [22]). Le port 53 est ignoré : la passerelle
+# UniFi redirige le DNS et répond sur 53 pour n'importe quelle IP du VLAN (constaté sur une adresse inexistante).
+- name: Contrôle de sécurité des hôtes
+  hosts: all:!monitor_only:!proxmox
+  become: true
+  gather_facts: false
+  vars:
+    security_ignored_ports: [53]
+    security_min_lynis: 65
+  tasks:
+    - name: Configuration effective de sshd
+      ansible.builtin.command: sshd -T
+      register: security_sshd
+      changed_when: false
+      check_mode: false
+
+    - name: Règles nftables de l'entrée
+      ansible.builtin.command: nft list chain inet infra_filter input
+      register: security_nft
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Conteneur (LXC) ou machine ?
+      ansible.builtin.command: systemd-detect-virt --container
+      register: security_virt
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Ports d'écoute propres à tailscaled (peerapi, interceptés avant le noyau, filtrés par les ACL du tailnet)
+      ansible.builtin.shell: |
+        set -o pipefail
+        ss -Htlnp | grep tailscaled | awk '{print $4}' | sed 's/.*://' | sort -un || true
+      args:
+        executable: /bin/bash
+      register: security_tailscaled_ports
+      changed_when: false
+      check_mode: false
+
+    - name: Paquets interdits installés (ufw, fail2ban)
+      ansible.builtin.shell: |
+        set -o pipefail
+        dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' ufw fail2ban 2>/dev/null | grep '^ii' || true
+      args:
+        executable: /bin/bash
+      register: security_forbidden
+      changed_when: false
+      check_mode: false
+
+    - name: Ports publiés par Docker
+      ansible.builtin.shell: |
+        set -o pipefail
+        command -v docker >/dev/null && docker ps --format '{% raw %}{{.Names}} {{.Ports}}{% endraw %}' || true
+      args:
+        executable: /bin/bash
+      register: security_docker
+      changed_when: false
+      check_mode: false
+
+    - name: État des services de sécurité  # noqa: command-instead-of-module
+      ansible.builtin.command: systemctl is-active {{ item }}
+      loop: "{{ ['unattended-upgrades'] + ([] if security_virt.stdout == 'lxc' else ['apparmor']) }}"
+      register: security_services
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Verrouillage du mot de passe root
+      ansible.builtin.command: passwd -S root
+      register: security_root
+      changed_when: false
+      check_mode: false
+
+    - name: Dernier score lynis (rapport produit par « infra.sh securite --lynis »)
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -h '^hardening_index=' /var/lib/infra/lynis/report.dat 2>/dev/null | cut -d= -f2 || true
+      args:
+        executable: /bin/bash
+      register: security_lynis
+      changed_when: false
+      check_mode: false
+
+    - name: Redémarrage en attente
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: security_reboot
+
+    - name: Mises à jour en attente  # noqa: command-instead-of-module
+      ansible.builtin.shell: |
+        set -o pipefail
+        apt-get -s upgrade 2>/dev/null | grep -c '^Inst' || true
+      args:
+        executable: /bin/bash
+      register: security_pending
+      changed_when: false
+      check_mode: false
+
+    - name: Scan TCP externe de tous les ports (depuis le contrôleur)
+      ansible.builtin.command: "{{ playbook_dir }}/../../scripts/scan-ports.py {{ ansible_host | default(inventory_hostname) }}"
+      delegate_to: localhost
+      become: false
+      register: security_scan
+      changed_when: false
+      check_mode: false
+
+    - name: Évaluation
+      ansible.builtin.set_fact:
+        security_open: "{{ (security_scan.stdout | from_json).open | difference(security_ignored_ports) }}"
+        security_tolerated: "{{ security_ignored_ports + (security_tailscaled_ports.stdout_lines | map('int') | list) }}"
+        security_failures: >-
+          {{
+            (['sshd : PermitRootLogin n est pas « no »'] if 'permitrootlogin no' not in security_sshd.stdout_lines else [])
+            + (['sshd : PasswordAuthentication n est pas « no »'] if 'passwordauthentication no' not in security_sshd.stdout_lines else [])
+            + (['sshd : AllowGroups ssh-users absent'] if (security_sshd.stdout_lines | select('match', '^allowgroups .*ssh-users') | list | length) == 0 else [])
+            + (['sshd : breakglass non interdit en SSH'] if (security_sshd.stdout_lines | select('match', '^denyusers .*breakglass') | list | length) == 0 else [])
+            + (['nftables : chaîne infra_filter absente ou politique d entrée différente de drop'] if 'policy drop' not in security_nft.stdout else [])
+            + (['paquet interdit installé : ' ~ security_forbidden.stdout] if security_forbidden.stdout | length > 0 else [])
+            + (['Docker : port publié sur toutes les interfaces : ' ~ (security_docker.stdout_lines | select('search', '(0\.0\.0\.0|\[::\]):[0-9]+->') | join(', '))]
+               if (security_docker.stdout_lines | select('search', '(0\.0\.0\.0|\[::\]):[0-9]+->') | list | length) > 0 else [])
+            + (['service de sécurité inactif : ' ~ (security_services.results | rejectattr('stdout', 'equalto', 'active') | map(attribute='item') | join(', '))]
+               if (security_services.results | rejectattr('stdout', 'equalto', 'active') | list | length) > 0 else [])
+            + (['root : mot de passe non verrouillé'] if (security_root.stdout.split()[1] | default('')) not in ['L', 'LK'] else [])
+            + (['lynis : score ' ~ security_lynis.stdout ~ ' < ' ~ security_min_lynis] if security_lynis.stdout | length > 0 and (security_lynis.stdout | int) < security_min_lynis else [])
+          }}
+        security_port_failures: "{{ (security_scan.stdout | from_json).open | difference(security_ignored_ports + (security_tailscaled_ports.stdout_lines | map('int') | list)) | difference(security_expected_ports | default([22])) }}"
+
+    - name: Compte rendu de l'hôte
+      ansible.builtin.debug:
+        msg:
+          - "ports ouverts vus de l'extérieur : {{ security_open }} (hors écoutes tailscaled et 53 ; attendus : {{ security_expected_ports | default([22]) }})"
+          - "lynis : {{ security_lynis.stdout | default('n/a') or 'n/a' }} ; mises à jour en attente : {{ security_pending.stdout | trim }} ; redémarrage requis : {{ 'OUI' if security_reboot.stat.exists else 'non' }}"
+          - "{{ 'ÉCARTS : ' ~ (security_failures + (['ports ouverts non attendus : ' ~ security_port_failures] if security_port_failures else [])) | join(' | ') if (security_failures or security_port_failures) else 'conforme' }}"
+
+    - name: Échec si écart
+      ansible.builtin.assert:
+        that:
+          - security_failures | length == 0
+          - security_port_failures | length == 0
+        fail_msg: "{{ inventory_hostname }} non conforme : {{ security_failures }} ports non attendus : {{ security_port_failures }}"
+        quiet: true

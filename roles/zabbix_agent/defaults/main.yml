@@ -1,0 +1,11 @@
+---
+# Serveur Zabbix : LXC zabbix sur le VLAN Infra. Les VPS l'atteignent via le subnet router Tailscale.
+zabbix_agent_server: ""
+# active : l'agent se connecte au serveur (aucun port entrant, rien à ouvrir dans nftables) ; passive : le serveur interroge l'agent (port 10050)
+zabbix_agent_mode: active
+zabbix_agent_hostname: "{{ inventory_hostname }}"
+# Métadonnées envoyées au serveur : l'action d'auto-enregistrement (rôle zabbix_server) ajoute l'hôte et lie le modèle
+zabbix_agent_tags: []
+zabbix_agent_host_metadata: "{{ ('infra-linux ' ~ (zabbix_agent_tags | join(' '))) | trim }}"
+# Mesures personnalisées (lignes UserParameter, ex. "infra.backup[*],/usr/local/bin/infra-backup-metric $1")
+zabbix_agent_user_parameters: []

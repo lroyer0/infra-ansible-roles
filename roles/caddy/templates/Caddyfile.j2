@@ -1,0 +1,36 @@
+{
+	admin 127.0.0.1:2019
+}
+{% for s in caddy_sites %}
+
+{{ s.host }} {
+	reverse_proxy {{ s.upstream }} {
+		header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+	}
+	header -Server
+	# En-têtes de sécurité (audit 2026-11-06 : aucun sur ces sites) ; « ? » = posé seulement si l'application ne le fait pas.
+	# Pas de CSP imposée : les thèmes Ghost chargent des ressources tierces, une CSP générique les casserait.
+	header {
+		# defer : appliqué après les en-têtes de l'application (sinon Ghost remet X-Powered-By)
+		defer
+		-X-Powered-By
+		?Strict-Transport-Security "max-age=31536000"
+		?X-Content-Type-Options "nosniff"
+		?X-Frame-Options "SAMEORIGIN"
+		?Referrer-Policy "strict-origin-when-cross-origin"
+		?Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+	}
+}
+{% for a in s.aliases | default([]) %}
+
+{{ a }} {
+	redir https://{{ s.host }}{uri} permanent
+}
+{% endfor %}
+{% endfor %}
+
+# Hôte inconnu (anti domain fronting) : connexion coupée
+:443 {
+	tls internal
+	abort
+}

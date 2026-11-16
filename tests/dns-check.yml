@@ -1,0 +1,48 @@
+---
+# Vérifie Unbound : résolution publique, MagicDNS, DNSSEC, latence à froid/en cache et stats.
+# Lecture seule : ne modifie rien. Usage : scripts/infra.sh test-dns <hôte>
+- name: Contrôle DNS (Unbound)
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    dns_check_domains: [example.org, github.com, kernel.org, wikipedia.org]
+    dns_check_max_cold_ms: 1500
+  tasks:
+    - name: Hôtes sans Unbound ignorés (invités maison, résolution par la passerelle UniFi)
+      ansible.builtin.meta: end_host
+      when: not (unbound_enabled | default(true) | bool)
+    - name: Mesure à froid puis en cache
+      ansible.builtin.shell: |
+        set -o pipefail
+        for pass in froid cache; do
+          dig +tries=1 +time=10 {{ item }} @127.0.0.1 | awk -v p=$pass '/Query time/ {print p, $4}'
+        done
+      args:
+        executable: /bin/bash
+      loop: "{{ dns_check_domains }}"
+      register: dns_check_times
+      changed_when: false
+    - name: Latence à froid sous le seuil
+      ansible.builtin.assert:
+        that: (item.stdout_lines[0].split()[1] | int) <= dns_check_max_cold_ms
+        fail_msg: "{{ item.item }} : {{ item.stdout_lines[0] }} ms (seuil {{ dns_check_max_cold_ms }})"
+      loop: "{{ dns_check_times.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+    - name: DNSSEC invalide refusé (SERVFAIL attendu)
+      ansible.builtin.shell: |
+        set -o pipefail
+        dig +tries=1 +time=10 dnssec-failed.org @127.0.0.1 | grep -c SERVFAIL || true
+      args:
+        executable: /bin/bash
+      register: dns_check_dnssec
+      changed_when: false
+      failed_when: dns_check_dnssec.stdout | int != 1
+    - name: Statistiques Unbound
+      ansible.builtin.command: unbound-control stats_noreset
+      register: dns_check_stats
+      changed_when: false
+    - name: Résumé
+      ansible.builtin.debug:
+        msg: "{{ dns_check_stats.stdout_lines | select('search', 'total.recursion.time.median|total.num.(queries|cachehits)=') | list }}"

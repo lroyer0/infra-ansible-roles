@@ -1,0 +1,9 @@
+---
+- name: Redémarrer journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+- name: Redémarrer chrony
+  ansible.builtin.systemd_service:
+    name: chrony
+    state: restarted

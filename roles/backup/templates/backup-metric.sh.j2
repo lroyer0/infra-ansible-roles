@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Géré par Ansible. Usage : infra-backup-metric <age|last_rc|duration|bytes>  (lu par l'agent Zabbix)
+f=/var/lib/infra-backup/client.status
+case "$1" in
+  age) ts=$(sed -n 's/^last_success=//p' "$f" 2>/dev/null); echo $(( $(date +%s) - ${ts:-0} )) ;;
+  last_rc|duration|bytes) v=$(sed -n "s/^$1=//p" "$f" 2>/dev/null); echo "${v:-0}" ;;
+  *) exit 1 ;;
+esac

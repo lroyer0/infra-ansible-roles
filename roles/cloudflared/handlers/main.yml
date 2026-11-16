@@ -1,0 +1,15 @@
+---
+- name: Redémarrer cloudflared (service géré par ce rôle)
+  ansible.builtin.systemd_service:
+    name: cloudflared
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode and cloudflared_service_managed | bool
+  listen: Redémarrer cloudflared
+
+# Service piloté ailleurs (portier du tunnel « status ») : ne redémarre que s'il tourne déjà, ne le démarre jamais (le portier décide).
+- name: Redémarrer cloudflared seulement s'il est actif (service piloté ailleurs)
+  ansible.builtin.command: systemctl try-restart cloudflared  # noqa: command-instead-of-module
+  when: not ansible_check_mode and not cloudflared_service_managed | bool
+  changed_when: true
+  listen: Redémarrer cloudflared

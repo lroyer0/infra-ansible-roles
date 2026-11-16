@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+if [ -n "${PS1:-}" ] && [ -z "${INFRA_MOTD_SHOWN:-}" ] && [ -n "${BASH_VERSION:-}" ]; then
+  INFRA_MOTD_SHOWN=1
+  _ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
+  _ctr=$(docker ps -q 2>/dev/null | wc -l)
+  printf '\n  %s  [{{ base_environment }}]\n  rôle        : {{ group_names | join(", ") }}\n  tailscale   : %s\n  conteneurs  : %s\n  dernier run : %s\n\n' \
+    "$(hostname)" "${_ts_ip:-n/a}" "$_ctr" "$(cat /var/lib/infra-last-ansible 2>/dev/null || echo jamais)"
+  unset _ts_ip _ctr
+fi

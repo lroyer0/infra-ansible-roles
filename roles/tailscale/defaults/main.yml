@@ -1,0 +1,27 @@
+---
+tailscale_apt_key_url: https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
+tailscale_apt_uri: https://pkgs.tailscale.com/stable/debian
+# Clé d'auth taguée et préautorisée : variable issue de SOPS (secrets/tailscale.sops.yaml), jamais en clair
+tailscale_authkey: ""
+# Tag du nœud, ex. tag:edge (obligatoire : les nœuds tagués n'expirent pas)
+tailscale_tag: ""
+tailscale_extra_args: []
+# Exit node : annonce 0.0.0.0/0 et ::/0 et active le forwarding IPv4/IPv6.
+# L'approbation de la route reste à faire dans la console Tailscale (ou via autoApprovers dans les ACL).
+tailscale_exit_node: false
+# Tailscale SSH désactivé sur toutes les machines : les validations périodiques « check » des ACL
+# bloquaient Ansible et les agents. L'accès passe par sshd durci (clés, AllowGroups ssh-users), port 22 ouvert sur tailscale0
+# (hardening_tailscale_tcp_ports). Pour le réactiver sur un hôte : tailscale_ssh: true dans ses host_vars.
+tailscale_ssh: false
+# Sans clé d'auth : connexion interactive (lien affiché, à valider dans le navigateur). Attente max : 15 minutes.
+tailscale_interactive: true
+# Routes de sous-réseaux annoncées (subnet router). Vide = aucune gestion des routes par le rôle.
+# L'exit node (0.0.0.0/0, ::/0) est géré à part par tailscale_exit_node et réinjecté dans la liste.
+tailscale_advertise_routes: []
+# Accepter les routes de sous-réseaux annoncées par les autres nœuds (VPS -> VLAN Infra via le subnet router).
+# Laisser à false sur le subnet router lui-même.
+tailscale_accept_routes: false
+# Restauration de l'identité d'un nœud reconstruit (clé du nœud : son IP Tailscale, ses routes et son exit node approuvés sont conservés).
+# Secret SOPS propre à l'hôte : tailscale_state_b64_<nom de l'hôte dans l'inventaire> (base64 de /var/lib/tailscale/tailscaled.state).
+# Jamais une variable commune : un autre nœud pourrait récupérer l'identité de celui-ci.
+tailscale_hostname: "{{ inventory_hostname_short }}"

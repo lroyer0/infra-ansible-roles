@@ -1,0 +1,212 @@
+---
+- name: Prérequis du module deb822_repository
+  ansible.builtin.apt:
+    name: python3-debian
+    state: present
+
+- name: Clé du dépôt Tailscale
+  ansible.builtin.get_url:
+    url: "{{ tailscale_apt_key_url }}"
+    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Ancien dépôt Tailscale au format .list retiré
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/tailscale.list
+    state: absent
+
+- name: Dépôt Tailscale
+  ansible.builtin.deb822_repository:
+    name: tailscale
+    types: [deb]
+    uris: "{{ tailscale_apt_uri }}"
+    suites: [trixie]
+    components: [main]
+    signed_by: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    state: present
+  register: tailscale_repo
+
+- name: Mise à jour du cache apt  # noqa: no-handler
+  ansible.builtin.apt:
+    update_cache: true
+  when: tailscale_repo is changed
+
+- name: Installer tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+  when: not (ansible_check_mode and tailscale_repo is changed)  # le dépôt n'existe pas encore en --check
+
+- name: Tailscaled actif
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    enabled: true
+    state: started
+  when: not (ansible_check_mode and tailscale_repo is changed)
+
+- name: État de Tailscale
+  ansible.builtin.command: tailscale status --json
+  register: tailscale_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Rejoindre le tailnet
+  ansible.builtin.command:
+    argv: >-
+      {{ ['tailscale', 'up', '--accept-dns=false', '--authkey=' + tailscale_authkey, '--advertise-tags=' + tailscale_tag]
+         + tailscale_extra_args }}
+  no_log: true
+  changed_when: true
+  when:
+    - (tailscale_status.stdout | default('{}', true) | from_json).BackendState | default('') != 'Running'
+    - tailscale_authkey | length > 0
+    - tailscale_tag | length > 0
+
+- name: Restauration de l'identité du nœud (reconstruction)
+  when:
+    - not ansible_check_mode
+    - lookup('ansible.builtin.vars', 'tailscale_state_b64_' ~ inventory_hostname_short, default='') | length > 0
+    - (tailscale_status.stdout | default('{}', true) | from_json).BackendState | default('') in ['NeedsLogin', 'NoState', 'Stopped']
+  block:
+    - name: Arrêt de tailscaled avant d'écraser son état
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        state: stopped
+    - name: Écriture de l'état du nœud
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.vars', 'tailscale_state_b64_' ~ inventory_hostname_short) | b64decode }}"
+        dest: /var/lib/tailscale/tailscaled.state
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+    - name: Redémarrage de tailscaled avec l'identité restaurée
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        state: started
+    - name: Attendre que le nœud soit connecté
+      ansible.builtin.command: tailscale status --json
+      register: tailscale_restore_wait
+      until: (tailscale_restore_wait.stdout | from_json).BackendState | default('') == 'Running'
+      retries: 12
+      delay: 5
+      changed_when: false
+    - name: Statut à jour
+      ansible.builtin.set_fact:
+        tailscale_status: "{{ tailscale_restore_wait }}"
+
+- name: Connexion interactive au tailnet (sans clé d'auth)
+  when:
+    - not ansible_check_mode
+    - (tailscale_status.stdout | default('{}', true) | from_json).BackendState | default('') != 'Running'
+    - tailscale_authkey | length == 0
+    - tailscale_interactive | bool
+  block:
+    - name: Lancer tailscale up en arrière-plan
+      ansible.builtin.shell: >-
+        timeout 900 tailscale up --accept-dns=false --hostname={{ inventory_hostname_short }}
+        {{ tailscale_extra_args | join(' ') }} > /run/tailscale-up.log 2>&1
+      async: 900
+      poll: 0
+      register: tailscale_up_job
+      changed_when: true
+
+    - name: Attendre le lien de connexion
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -o 'https://login.tailscale.com/[a-z0-9/]*' /run/tailscale-up.log | head -1
+      args:
+        executable: /bin/bash
+      register: tailscale_login_url
+      until: tailscale_login_url.stdout | length > 0
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: Lien à ouvrir pour valider le nœud
+      ansible.builtin.debug:
+        msg: "Valider {{ inventory_hostname_short }} : {{ tailscale_login_url.stdout }}"
+
+    - name: Attendre la validation (15 min max)
+      ansible.builtin.command: tailscale status --json
+      register: tailscale_wait
+      until: (tailscale_wait.stdout | from_json).BackendState | default('') == 'Running'
+      retries: 90
+      delay: 10
+      changed_when: false
+
+- name: Échec explicite si le nœud n'est pas dans le tailnet
+  ansible.builtin.assert:
+    that: >-
+      (tailscale_status.stdout | default('{}', true) | from_json).BackendState | default('') == 'Running'
+      or tailscale_interactive | bool
+      or (tailscale_authkey | length > 0 and tailscale_tag | length > 0)
+    fail_msg: "Nœud hors tailnet : fournir tailscale_authkey (SOPS) et tailscale_tag, ou activer tailscale_interactive."
+  when: not ansible_check_mode
+
+- name: Forwarding IPv4 et IPv6 pour l'exit node
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/91-tailscale-forward.conf
+    reload: true
+    sysctl_set: true
+  loop: "{{ tailscale_forward_sysctl | dict2items }}"
+  vars:
+    # accept_ra=2 : sans lui, activer le forwarding IPv6 supprime la route par défaut apprise par RA
+    tailscale_forward_sysctl:
+      net.ipv4.ip_forward: 1
+      net.ipv6.conf.all.forwarding: 1
+      net.ipv6.conf.all.accept_ra: 2
+      net.ipv6.conf.default.accept_ra: 2
+  when: tailscale_exit_node | bool
+
+- name: Préférences Tailscale actuelles
+  ansible.builtin.command: tailscale debug prefs
+  register: tailscale_prefs
+  changed_when: false
+  check_mode: false
+  when: tailscale_status.rc == 0
+
+- name: Exit node annoncé ou retiré
+  ansible.builtin.command: tailscale set --advertise-exit-node={{ 'true' if tailscale_exit_node | bool else 'false' }}
+  changed_when: true
+  when:
+    - tailscale_prefs is not skipped
+    - ('0.0.0.0/0' in (tailscale_prefs.stdout | from_json).AdvertiseRoutes | default([], true) | map('string') | list) != (tailscale_exit_node | bool)
+
+- name: Tailscale SSH activé ou désactivé selon tailscale_ssh
+  ansible.builtin.command: tailscale set --accept-risk=lose-ssh --ssh={{ 'true' if tailscale_ssh | bool else 'false' }}
+  changed_when: true
+  when:
+    - tailscale_prefs is not skipped
+    - (tailscale_prefs.stdout | from_json).RunSSH | default(false) != (tailscale_ssh | bool)
+
+- name: Routes de sous-réseaux annoncées
+  ansible.builtin.command: >-
+    tailscale set --advertise-routes={{ (tailscale_advertise_routes
+    + (['0.0.0.0/0', '::/0'] if tailscale_exit_node | bool else [])) | join(',') }}
+  changed_when: true
+  when:
+    - tailscale_prefs is not skipped
+    - tailscale_advertise_routes | length > 0
+    - >-
+      ((tailscale_prefs.stdout | from_json).AdvertiseRoutes | default([], true)) | sort
+      != (tailscale_advertise_routes + (['0.0.0.0/0', '::/0'] if tailscale_exit_node | bool else [])) | sort
+
+- name: Acceptation des routes de sous-réseaux
+  ansible.builtin.command: tailscale set --accept-routes={{ 'true' if tailscale_accept_routes | bool else 'false' }}
+  changed_when: true
+  when:
+    - tailscale_prefs is not skipped
+    - (tailscale_prefs.stdout | from_json).RouteAll | default(false) != (tailscale_accept_routes | bool)
+
+- name: Nom du nœud dans le tailnet
+  ansible.builtin.command: tailscale set --hostname={{ tailscale_hostname }}
+  changed_when: true
+  when:
+    - tailscale_prefs is not skipped
+    - (tailscale_prefs.stdout | from_json).Hostname | default('') != tailscale_hostname

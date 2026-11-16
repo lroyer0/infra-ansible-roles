@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Géré par Ansible (rôle backup). Dumps SQL, puis sauvegarde restic vers le dépôt maison.
+set -euo pipefail
+set -a; . /etc/restic/env; set +a
+export RESTIC_PASSWORD_FILE=/etc/restic/password
+state=/var/lib/infra-backup/client.status
+dumps="{{ backup_dumps_dir }}"
+start=$(date +%s)
+bytes=0
+last_success=$(sed -n 's/^last_success=//p' "$state" 2>/dev/null || true)
+finish() {
+  rc=$?
+  end=$(date +%s)
+  [ "$rc" -eq 0 ] && last_success=$end
+  {
+    echo "last_run=$end"; echo "last_rc=$rc"; echo "duration=$((end - start))"
+    echo "bytes=$bytes"; echo "last_success=${last_success:-0}"
+  } > "$state.tmp"
+  chmod 644 "$state.tmp"
+  mv "$state.tmp" "$state"
+}
+trap finish EXIT
+install -d -m 700 "$dumps"
+{% for d in backup_db_dumps %}
+{% if d.container is defined %}
+docker exec {{ d.container }} sh -c '{{ d.command }}' | gzip -c > "$dumps/{{ d.name }}.sql.gz.tmp"
+{% else %}
+sh -c '{{ d.command }}' | gzip -c > "$dumps/{{ d.name }}.sql.gz.tmp"
+{% endif %}
+mv "$dumps/{{ d.name }}.sql.gz.tmp" "$dumps/{{ d.name }}.sql.gz"
+{% endfor %}
+restic cat config >/dev/null 2>&1 || restic init
+out=$(restic backup --tag infra --exclude-caches --json {% for e in backup_excludes %}--exclude '{{ e }}' {% endfor %}{{ (backup_paths + [backup_dumps_dir]) | join(' ') }} | tail -1)
+bytes=$(printf '%s' "$out" | jq -r '.total_bytes_processed // 0')

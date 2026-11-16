@@ -1,0 +1,50 @@
+---
+# Full host configuration. Hardening runs last: the firewall closes once every service is in place.
+- name: Host baseline
+  hosts: all:!monitor_only:!proxmox
+  become: true
+  roles:
+    - role: base
+      tags: [base]
+    - role: tailscale
+      when: tailscale_enabled | default(true) | bool
+      tags: [tailscale]
+    - role: unbound
+      when: unbound_enabled | default(true) | bool
+      tags: [unbound]
+    - role: docker
+      when: docker_enabled | default(true) | bool
+      tags: [docker]
+    - role: zabbix_agent
+      when: zabbix_agent_server | default('') | length > 0
+      tags: [zabbix]
+    - role: hardening
+      tags: [hardening]
+  post_tasks:
+    - name: No container publishes on all interfaces
+      ansible.builtin.include_role:
+        name: docker
+        tasks_from: check_ports
+      when: docker_enabled | default(true) | bool
+      tags: [docker]
+
+- name: Restic backup clients
+  hosts: backup_clients
+  become: true
+  roles:
+    - role: backup
+      tags: [backup]
+
+- name: Cloudflare Tunnel connectors
+  hosts: cloudflared_hosts
+  become: true
+  roles:
+    - role: cloudflared
+      tags: [cloudflared]
+
+- name: Local Caddy reverse proxy
+  hosts: caddy_hosts
+  become: true
+  roles:
+    - role: caddy
+      tags: [caddy]
